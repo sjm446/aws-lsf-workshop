@@ -18,6 +18,10 @@ The following is required to run this workshop:
 * A free subscription to the [AWS FPGA Developer AMI](https://aws.amazon.com/marketplace/pp/B06VVYBLZZ).
 * A free subscription to the [Official CentOS 7 x86_64 HVM AMI](https://aws.amazon.com/marketplace/pp/B00O7WM7QW).
 
+## Options
+
+There are two options for this workshop. The first to foloow the full instructions below. This will build a realistic environment, with NetApp storage (that works well as a LSF filesystem). The second option is to deploy the basic template. That runs LSF from the headnode, sharing the lSF and Home folders from that server. Much quicker to deploy, cheaper to run, but not suitable for a production environment.
+
 ## Tutorials
 
 This workshop consists of two tutorials.  You must complete the tutorials in sequence.
