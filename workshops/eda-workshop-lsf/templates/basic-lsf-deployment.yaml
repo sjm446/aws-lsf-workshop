@@ -1,0 +1,601 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: |
+  This template deploys a login server, an LSF master server, a supporting NFS file system, 
+  and installs LSF software that you provide.
+  
+  **WARNING** This template creates Amazon EC2 instances, an FSx for NetApp ONTAP file system, and related resources. 
+  You will be billed for the AWS resources used if you create a stack from this template.
+
+Mappings:
+  RegionMap:
+    eu-west-2:           # London
+      CentOS75: ami-06672d07f62285d1d
+      ALinux2: ami-06672d07f62285d1d
+    eu-west-1:           # Dublin
+      CentOS75: ami-02476eb835fc66157
+      ALinux2: ami-02476eb835fc66157
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: "Network configuration"
+        Parameters:
+          - VpcId
+          - MasterServerSubnet
+          - ComputeNodeSubnet
+          - SshSource
+          - AdminKeyPair
+      - 
+        Label:
+          default: "LSF software configuration"
+        Parameters:
+          - LSFInstallPath
+          - LSFClusterName
+          - CustomerLSFInstallUri
+          - CustomerLSFBinsUri
+          - CustomerLSFEntitlementUri
+          - CustomerLSFFixPackUri
+          - ComputeAMI
+      -
+        Label:
+          default: "LSF master configuration"
+        Parameters:
+          - MasterInstanceType
+          - MasterServerAMI
+
+    ParameterLabels:
+      VpcId:
+        default: Cluster VPC
+      AdminKeyPair:
+        default: EC2 Key Pair
+      SshSource:
+        default: Source IP
+      MasterInstanceType:
+        default: LSF master instance type
+      MasterServerAMI:
+        default: Master server AMI (OS image)
+      ComputeAMI:
+        default: Compute node AMI (OS image)
+      LSFClusterName:
+        default: LSF cluster name
+      LSFInstallPath:
+        default: LSF install path
+      MasterServerSubnet:
+        default: LSF master subnet
+      ComputeNodeSubnet:
+        default: Compute node subnet
+      CustomerLSFInstallUri:
+        default: LSF install script location
+      CustomerLSFBinsUri:
+        default: LSF distribution package location
+      CustomerLSFEntitlementUri:
+        default: LSF entitlement file location
+      CustomerLSFFixPackUri:
+        default: LSF fix pack
+
+Parameters:
+  VpcId:
+    Description: The VPC in which to install the cluster resources
+    Type: 'AWS::EC2::VPC::Id'
+    Default: vpc-01234567
+  AdminKeyPair:
+    Description: The name of an existing EC2 Key Pair for cluster SSH logins
+    Type: "AWS::EC2::KeyPair::KeyName"
+    AllowedPattern: ".+"
+    Default: keyname
+  SshSource:
+    Description: >
+      The CIDR range of the remote hosts that are permitted to log into the infrastructure instances.
+      Use your public IP address (http://checkip.amazonaws.com) suffixed with /32.
+    Type: String
+    Default: 0.0.0.0/0
+  MasterServerSubnet:
+    Description: The subnet for the LSF master server.  This subnet must have access to the internet.
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-12345678
+  ComputeNodeSubnet:
+    Description: The subnet for the LSF compute nodes
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-12345678
+  MasterInstanceType:
+    Description: The instance type of the master node of the cluster
+    Type: "String"
+    Default: "m5.2xlarge"
+  MasterServerAMI:
+    Description: The AMI (OS image) for the master server. We recommend Amazon Linux 2."
+    Type: "String"
+    Default: "ALinux2"
+    AllowedValues:
+      - ALinux2
+  ComputeAMI:
+    Description: >
+      The AMI (OS image) for the compute nodes and login servers.
+    Type: "String"
+    Default: "ALinux2"
+    AllowedValues:
+      - ALinux2
+  LSFClusterName:
+    Description: The LSF cluster name
+    Type: "String"
+    Default: "cluster1"
+  CustomerLSFInstallUri:
+    Description: >
+      The S3 URI to the LSF installer script package. 
+      Select package object in the console and choose Copy Path and paste here.
+    Type: "String"
+    Default: "s3://bucket/lsf/lsf10.1_lsfinstall_linux_x86_64.tar.gz"
+  CustomerLSFBinsUri:
+    Description: >
+      The S3 URI to the LSF distribution package. This must be a full distribution and not a patch or Fix Pack package.
+      Select package object in the console and choose Copy Path and paste here.
+    Type: "String"
+    Default: "s3://bucket/lsf/lsf10.1_linux2.6-glibc2.3-x86_64.tar.gz"
+  CustomerLSFFixPackUri:
+    Description: >
+      The S3 URI to the LSF Fix Pack package. This must the lastest Fix Pack package.
+      Select package object in the console and choose Copy Path and paste here.
+    Type: "String"
+    Default: "s3://bucket/lsf/lsf10.1_linux2.6-glibc2.3-x86_64-601088.tar.gz"
+  CustomerLSFEntitlementUri:
+    Description: >
+      The S3 URI to the LSF 10.1 entitlement file, lsf_std_entitlement.dat or lsf_adv_entitlement.dat.
+      Select package object in the S3 console and choose Copy Path and paste here.
+    Type: String
+    Default: s3://bucket/lsf/lsf_std_entitlement.dat
+    AllowedPattern: ^s3\:\/\/.*
+
+Resources:
+  LSFMasterInstance:
+    Type: "AWS::EC2::Instance"
+    CreationPolicy:
+      ResourceSignal:    
+        Count: 1
+        Timeout: PT15M
+    Properties:
+      InstanceType: !Ref MasterInstanceType
+      ImageId:
+        Fn::FindInMap:
+        - RegionMap
+        - !Ref AWS::Region
+        - !Ref MasterServerAMI
+      SubnetId: !Ref MasterServerSubnet
+      SecurityGroupIds: 
+        - !Ref LSFMasterSG 
+      KeyName: !Ref AdminKeyPair
+      IamInstanceProfile: !Ref LSFMasterInstanceProfile
+      Tags:
+        - 
+          Key: "Name"
+          Value: !Join [ '', [ 'LSF Mgmt Host - ',!Ref LSFClusterName ] ]
+        - 
+          Key: "Cluster"
+          Value: !Ref LSFClusterName
+      UserData:
+        Fn::Base64: 
+          Fn::Sub:
+            - |
+              #!/bin/bash
+
+              set -x
+              exec > >(tee /var/log/user-data.log|logger -t user-data ) 2>&1
+
+              echo "*** BEGIN LSF MASTER BOOTSTRAP ***"
+
+              export LSF_INSTALL_DIR="/opt/ibm/lsf/${LSFClusterName}"
+              export LSF_ADMIN=lsfadmin
+              export LSF_INSTALL_PKG=`echo ${CustomerLSFInstallUri} | awk -F "/" '{print $NF}'`
+              export LSF_BIN_PKG=`echo ${CustomerLSFBinsUri} | awk -F "/" '{print $NF}'`
+              export LSF_FP_PKG=`echo ${CustomerLSFFixPackUri} | awk -F "/" '{print $NF}'`
+              export LSF_ENTITLEMENT=`echo ${CustomerLSFEntitlementUri} | awk -F "/" '{print $NF}'`
+              export LSF_MOUNT_POINT=`dirname $LSF_INSTALL_DIR`
+
+              echo LSF_INSTALL_DIR: $LSF_INSTALL_DIR
+              echo LSF_ADMIN: $LSF_ADMIN
+              echo LSF_INSTALL_PKG: $LSF_INSTALL_PKG
+              echo LSF_BIN_PKG: $LSF_BIN_PKG
+              echo LSF_FP_PKG: $LSF_FP_PKG
+              echo LSF_ENTITLEMENT: $LSF_ENTITLEMENT
+              echo LSF_MOUNT_POINT: $LSF_MOUNT_POINT
+
+              # Disable Hyperthreading
+              echo "Disabling Hyperthreading"
+              for cpunum in $(cat /sys/devices/system/cpu/cpu*/topology/thread_siblings_list | cut -s -d, -f2- | tr ',' '\n' | sort -un)
+              do
+                echo 0 > /sys/devices/system/cpu/cpu$cpunum/online
+              done
+
+              # Install cfn-signal helper script to signal bootstrap completion to CloudFormation
+              yum update -y aws-cfn-bootstrap
+
+              # Install LSF installer prereqs
+              yum install ed -q -y
+              yum install java-1.8.0-openjdk -q -y
+              yum install wget -q -y
+              yum install vim -q -y
+
+              ## Mount NFS file system for LSF install
+              # Create mount point
+              mkdir -p $LSF_INSTALL_DIR
+              
+              mkdir -p {$LSF_INSTALL_DIR}
+              #,$LSF_INSTALL_DIR/proj,$LSF_INSTALL_DIR/scratch}
+              chmod 777 $LSF_INSTALL_DIR
+              #/{proj,scratch}
+              mkdir /var/log/lsf && chmod 777 /var/log/lsf
+
+              # TODO: Setup CloudWatch Logs daemon and send LSF logs to CloudWatch              # See docs
+
+              ##############################################
+              # Install LSF using customer-provided packages
+              ##############################################
+
+              # Add LSF admin account
+              adduser -m -u 1500 $LSF_ADMIN
+
+              # Download customer-provided LSF binaries and entitlement file
+              aws s3 cp ${CustomerLSFInstallUri} /tmp
+              aws s3 cp ${CustomerLSFBinsUri} /tmp
+              aws s3 cp ${CustomerLSFEntitlementUri} /tmp
+              aws s3 cp ${CustomerLSFFixPackUri} /tmp
+              ls /tmp
+
+              cd /tmp
+              tar xf $LSF_INSTALL_PKG
+              cp $LSF_BIN_PKG lsf10.1_lsfinstall
+              cd lsf10.1_lsfinstall
+
+              # Create LSF installer config file
+              cat << EOF > install.config
+              LSF_TOP="$LSF_INSTALL_DIR"
+              LSF_ADMINS="$LSF_ADMIN"
+              LSF_CLUSTER_NAME="${LSFClusterName}"
+              LSF_MASTER_LIST="${!HOSTNAME%%.*}"
+              SILENT_INSTALL="Y"
+              LSF_SILENT_INSTALL_TARLIST="ALL"
+              ACCEPT_LICENSE="Y"
+              LSF_ENTITLEMENT_FILE="/tmp/$LSF_ENTITLEMENT"
+              EOF
+
+              sleep 1
+              echo Contents of install.config
+              cat install.config
+              echo dir listing of LSF install
+              ls -al
+
+              ./lsfinstall -f install.config
+              
+              # Setup LSF environment
+              source $LSF_INSTALL_DIR/conf/profile.lsf
+
+              # Install fix pack
+              cd $LSF_INSTALL_DIR/10.1/install
+              cp /tmp/$LSF_FP_PKG .
+              echo "schmod_demand.so" >> patchlib/daemonlists.tbl
+              ./patchinstall --silent $LSF_FP_PKG
+
+              ## Create Resource Connector config dir
+              mkdir -p $LSF_ENVDIR/resource_connector/aws/conf
+              chown -R lsfadmin:root $LSF_ENVDIR/resource_connector/aws
+
+              # Configure LSF and Resource Connector
+              # Sets AWS as the sole host provider
+              aws s3 cp s3://bucket/lsf/hostProviders.json $LSF_ENVDIR/resource_connector/hostProviders.json
+
+              # awsprov.config.json
+              aws s3 cp s3://bucket/lsf/awsprov_config.json $LSF_ENVDIR/resource_connector/aws/conf/awsprov_config.json
+              sed -i -e "s/_CFN_AWS_REGION_/${AWS::Region}/" $LSF_ENVDIR/resource_connector/aws/conf/awsprov_config.json
+
+              # awsprov.templates.json
+              aws s3 cp s3://bucket/lsf/awsprov_templates.json $LSF_ENVDIR/resource_connector/aws/conf/awsprov_templates.json
+              
+              export LSF_HEADNODE=`hostname`
+
+              sed -i -e "s|%CFN_COMPUTE_AMI%|${LSFComputeNodeAmi}|" \
+                     -e "s|%CFN_COMPUTE_NODE_SUBNET%|${ComputeNodeSubnet}|" \
+                     -e "s|%CFN_ADMIN_KEYPAIR%|${AdminKeyPair}|" \
+                     -e "s|%CFN_COMPUTE_SECURITY_GROUP_ID%|${LSFComputeNodeSGGroupId}|" \
+                     -e "s|%CFN_LSF_COMPUTE_NODE_INSTANCE_PROFILE_ARN%|${LSFComputeNodeInstanceProfileArn}|" \
+                     -e "s|%CFN_LSF_CLUSTER_NAME%|${LSFClusterName}|" \
+                     -e "s|%CFN_LSF_INSTALL_DIR%|$LSF_INSTALL_DIR|" \
+                     -e "s|%CFN_NFS_MOUNT_POINT%|$LSF_MOUNT_POINT|" \
+                     -e "s|%CFN_LSF_COMPUTE_NODE_SPOT_FLEET_ROLE_ARN%|${LSFComputeNodeSpotFleetRoleArn}|" \
+                     $LSF_ENVDIR/resource_connector/aws/conf/awsprov_templates.json
+
+              cat $LSF_ENVDIR/resource_connector/aws/conf/awsprov_templates.json
+              
+              # Copy the user_data script that RC executes on compute nodes. This does the LSF setup on the nodes.
+              aws s3 cp s3://bucket/lsf/basic_user_data.sh $LSF_INSTALL_DIR/10.1/resource_connector/aws/scripts/user_data.sh
+              chmod +x $LSF_INSTALL_DIR/10.1/resource_connector/aws/scripts/user_data.sh
+              sed -i -e "s|LSF_HEADNODE|$LSF_HEADNODE|" $LSF_INSTALL_DIR/10.1/resource_connector/aws/scripts/user_data.sh
+
+              # Copy in pre-configured lsf config files
+              aws s3 cp s3://bucket/lsf/lsf.shared $LSF_ENVDIR/lsf.shared
+              sed -i -e "s/^_CFN_LSF_CLUSTER_NAME_/${LSFClusterName}/" $LSF_ENVDIR/lsf.shared
+
+              aws s3 cp s3://bucket/lsf/lsb.queues $LSF_ENVDIR/lsbatch/${LSFClusterName}/configdir/lsb.queues
+
+              aws s3 cp s3://bucket/lsf/lsb.modules $LSF_ENVDIR/lsbatch/${LSFClusterName}/configdir/lsb.modules
+
+              aws s3 cp s3://bucket/lsf/lsb.params $LSF_ENVDIR/lsbatch/${LSFClusterName}/configdir/lsb.params
+
+              # lsf.cluster.*  Uncomment params to support dynamic hosts
+              sed -i -e 's/#\sLSF_HOST_ADDR_RANGE/LSF_HOST_ADDR_RANGE/' \
+                     -e 's/#\sFLOAT_CLIENTS/FLOAT_CLIENTS/' \
+                  $LSF_ENVDIR/lsf.cluster.*
+
+              
+              # mosquitto.conf.  Enables mostquitto daemon, which RC uses to show bhosts -rc output.
+              cat << EOF > $LSF_ENVDIR/mosquitto.conf
+              log_dest file /var/log/lsf/mosquitto.log
+              log_type all
+              EOF
+              chown $LSF_ADMIN $LSF_ENVDIR/mosquitto.conf
+
+              # lsf.conf
+              # Set logging to local file system
+              sed -i -e 's|^LSF_LOGDIR.*|LSF_LOGDIR=/var/log/lsf|' $LSF_ENVDIR/lsf.conf
+
+              # lsf.conf. Append RC config to config file that was created by LSF installer.
+              cat << EOF >> $LSF_ENVDIR/lsf.conf
+
+              LSF_STRIP_DOMAIN=.ec2.internal:.${AWS::Region}.compute.internal
+
+              ######################################
+              # LSF RESOURCE CONNECTOR CONFIGURATION
+              ######################################
+
+              LSB_RC_EXTERNAL_HOST_FLAG=aws
+
+              # Adds 'aws' boolean to dynamic hosts
+              LSF_LOCAL_RESOURCES="[resource aws] [type LINUX64]"
+
+              #LSB_RC_MAX_INSTANCES_PER_TEMPLATE=1000
+
+              #LSB_RC_DEFAULT_HOST_TYPE=X86_64
+
+              LSB_RC_UPDATE_INTERVAL=10
+
+              LSB_RC_QUERY_INTERVAL=15
+
+              # Let LSB_RC_EXTERNAL_HOST_IDLE_TIME below shut down idle instances
+              #LSB_RC_EXTERNAL_HOST_MAX_TTL=10
+
+              LSB_RC_EXTERNAL_HOST_IDLE_TIME=10
+
+              # starts the mosquitto daemon, which is required for the bhosts -rc and
+              # bhosts -rconly commands to work.
+              # mosquitto runs on default port 1883.
+              LSF_MQ_BROKER_HOSTS=$HOSTNAME
+              # The params below allow remote clients to query RC status from mosquitto
+              MQTT_BROKER_HOST=$HOSTNAME
+              MQTT_BROKER_PORT=1883
+
+              #EBROKERD_HOST_CLEAN_DELAY=60
+
+              ######################################
+              # DYNAMIC HOST CONFIGURATION
+              ######################################
+
+              # Keep this less than 3 seconds for smooth RC operation.
+              LSF_DYNAMIC_HOST_WAIT_TIME=3
+
+              #LSF_REG_FLOAT_HOSTS=Y
+
+              #LSF_DYNAMIC_HOST_KEEP=y
+
+              #EGO_ENABLE_AUTO_DAEMON_SHUTDOWN=Y
+
+              LSF_DYNAMIC_HOST_TIMEOUT=60m
+
+              EOF
+
+
+              # Configure system scripts to start LSF at boot time
+              # Add cshrc.lsf and profile.lsf to system-wide environment
+              # Start LSF daemons
+              $LSF_INSTALL_DIR/10.1/install/hostsetup --top="$LSF_INSTALL_DIR" \
+                                                      --boot="y"    \
+                                                      --profile="y" \
+                                                      --start="y"
+
+              # Verify that LSF is up and send signal to Cloudformation
+              sleep 10
+
+              echo "$LSF_MOUNT_POINT *(rw)" >> /etc/exports
+              echo "/home *(rw)" >> /etc/exports
+
+              systemctl enable nfs-server
+              systemctl start nfs-server
+
+              lsid
+              /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource LSFMasterInstance --region ${AWS::Region}
+              
+
+              echo "*** END LSF MASTER BOOTSTRAP ***"
+
+            - LSFComputeNodeInstanceProfileArn: !GetAtt LSFComputeNodeInstanceProfile.Arn
+              LSFComputeNodeSpotFleetRoleArn: !GetAtt LSFSpotFleetRole.Arn
+              LSFComputeNodeSGGroupId: !Ref LSFComputeNodeSG
+              LSFComputeNodeAmi: !FindInMap [ RegionMap, !Ref "AWS::Region", !Ref ComputeAMI ]
+
+
+  LSFMasterRole:
+      Type: "AWS::IAM::Role"
+      Properties:
+        Description: AWS service permissions for LSF Resource Connector
+        Path: "/"
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - 
+              Effect: Allow
+              Principal:
+                Service:
+                - "ec2.amazonaws.com"
+              Action:
+              - "sts:AssumeRole"
+        ManagedPolicyArns:
+          - "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess"
+          - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        Policies:
+          - PolicyName: LSFResourceConnectorPerms
+            PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - ec2:DescribeInstances
+                    - ec2:DescribeInstanceStatus
+                    - ec2:DescribeKeyPairs
+                    - ec2:RunInstances
+                    - ec2:TerminateInstances
+                    - ec2:CreateTags
+                    - ec2:ModifyIdFormat
+                    - ec2:AssociateIamInstanceProfile
+                    - ec2:ReplaceIamInstanceProfileAssociation
+                    - ec2:CancelSpotFleetRequests
+                    - ec2:DescribeSpotFleetInstances
+                    - ec2:DescribeSpotFleetRequests
+                    - ec2:DescribeSpotFleetRequestHistory
+                    - ec2:ModifySpotFleetRequest
+                    - ec2:RequestSpotFleet
+                    - ec2:DescribeSpotInstanceRequests
+                    - ec2:DescribeLaunchTemplateVersions
+                    - ec2:GetLaunchTemplateData
+                    - ec2:CreateLaunchTemplateVersion
+                  Resource: '*'
+                - Effect: Allow
+                  Action:
+                    - iam:PassRole
+                    - iam:ListRoles
+                    - iam:ListInstanceProfiles
+                    - iam:CreateServiceLinkedRole
+                  Resource:
+                    - !GetAtt LSFSpotFleetRole.Arn
+                    - !GetAtt LSFComputeNodeRole.Arn
+                  Condition:
+                      StringEquals:
+                        iam:PassedToService:
+                            "ec2.amazonaws.com"
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                  Resource: '*'
+
+  LSFSpotFleetRole:
+      Type: "AWS::IAM::Role"
+      Properties:
+        Description: Enables EC2 Spot Fleet to work on behalf of LSF Resource Connector
+        Path: "/"
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - 
+              Effect: Allow
+              Principal:
+                Service:
+                - "spotfleet.amazonaws.com"
+              Action:
+              - "sts:AssumeRole"
+        ManagedPolicyArns:
+          - "arn:aws:iam::aws:policy/service-role/AmazonEC2SpotFleetTaggingRole"
+
+  LSFComputeNodeRole:
+      Type: "AWS::IAM::Role"
+      Properties:
+        Description: AWS service permissions for LSF compute nodes
+        Path: "/"
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - 
+              Effect: Allow
+              Principal:
+                Service:
+                - "ec2.amazonaws.com"
+              Action:
+              - "sts:AssumeRole"
+        ManagedPolicyArns:
+          - "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess"
+          - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        Policies:
+          - PolicyName: DownloadS3Packages
+            PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                  Resource: '*'
+
+  LSFMasterInstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref LSFMasterRole
+
+  LSFComputeNodeInstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref LSFComputeNodeRole
+
+  LSFMasterSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "SG for LSF Master"
+      VpcId: !Ref VpcId
+
+  LSFComputeNodeSG:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "SG for LSF Compute Nodes"
+      VpcId: !Ref VpcId
+
+  LSFMasterSGRule01:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !Ref LSFMasterSG
+      Description: "SSH ingress"
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      CidrIp: !Ref SshSource
+
+  LSFMasterSGRule02:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !Ref LSFMasterSG
+      Description: "All traffic from LSF Compute Nodes"
+      IpProtocol: "-1"
+      SourceSecurityGroupId: !Ref LSFComputeNodeSG
+
+  LSFComputeNodeSGRule01:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !Ref LSFComputeNodeSG
+      Description: "All traffic from LSF Master" 
+      IpProtocol: "-1"
+      SourceSecurityGroupId: !Ref LSFMasterSG
+
+  LSFComputeNodeSGRule02:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !Ref LSFComputeNodeSG
+      Description: "All traffic from other LSF exec hosts" 
+      IpProtocol: "-1"
+      SourceSecurityGroupId: !Ref LSFComputeNodeSG
+
+  LSFComputeNodeSGRule03:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !Ref LSFComputeNodeSG
+      Description: "SSH Ingress" 
+      IpProtocol: "tcp"
+      FromPort: 22
+      ToPort: 22
+      CidrIp: !Ref SshSource
